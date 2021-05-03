@@ -112,6 +112,11 @@ export class AtelierAPI {
               }
             }
           }
+        } else {
+          const wsFolderOfFile = vscode.workspace.getWorkspaceFolder(wsOrFile);
+          if (wsFolderOfFile) {
+            workspaceFolderName = wsFolderOfFile.name;
+          }
         }
       } else {
         workspaceFolderName = wsOrFile;
@@ -168,7 +173,7 @@ export class AtelierAPI {
     let serverName = workspaceFolderName.toLowerCase();
     if (config("intersystems.servers").has(serverName)) {
       this.externalServer = true;
-    } else if (conn.server) {
+    } else if (conn.server && config("intersystems.servers", workspaceFolderName).has(conn.server)) {
       serverName = conn.server;
     } else {
       serverName = "";
@@ -203,7 +208,7 @@ export class AtelierAPI {
     } else {
       this._config = conn;
       this._config.ns = namespace || conn.ns;
-      this._config.serverName = serverName;
+      this._config.serverName = "";
     }
   }
 
@@ -287,9 +292,14 @@ export class AtelierAPI {
     let authRequest = authRequestMap.get(target);
     if (cookies.length || method === "HEAD") {
       auth = Promise.resolve(cookies);
-      headers["Authorization"] = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+
+      // Only send basic authorization if username and password specified (including blank, for unauthenticated access)
+      if (typeof username === "string" && typeof password === "string") {
+        headers["Authorization"] = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+      }
     } else if (!cookies.length) {
       if (!authRequest) {
+        // Recursion point
         authRequest = this.request(0, "HEAD");
         authRequestMap.set(target, authRequest);
       }

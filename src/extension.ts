@@ -64,7 +64,7 @@ import { ObjectScriptDebugAdapterDescriptorFactory } from "./debug/debugAdapterF
 import { ObjectScriptConfigurationProvider } from "./debug/debugConfProvider";
 import { ObjectScriptExplorerProvider, registerExplorerOpen } from "./explorer/explorer";
 import { WorkspaceNode } from "./explorer/models/workspaceNode";
-import { FileSystemProvider } from "./providers/FileSystemPovider/FileSystemProvider";
+import { FileSystemProvider } from "./providers/FileSystemProvider/FileSystemProvider";
 import { WorkspaceSymbolProvider } from "./providers/WorkspaceSymbolProvider";
 import {
   connectionTarget,
@@ -78,10 +78,11 @@ import {
 } from "./utils";
 import { ObjectScriptDiagnosticProvider } from "./providers/ObjectScriptDiagnosticProvider";
 import { DocumentRangeFormattingEditProvider } from "./providers/DocumentRangeFormattingEditProvider";
+import { DocumentLinkProvider } from "./providers/DocumentLinkProvider";
 
 /* proposed */
-import { FileSearchProvider } from "./providers/FileSystemPovider/FileSearchProvider";
-import { TextSearchProvider } from "./providers/FileSystemPovider/TextSearchProvider";
+import { FileSearchProvider } from "./providers/FileSystemProvider/FileSearchProvider";
+import { TextSearchProvider } from "./providers/FileSystemProvider/TextSearchProvider";
 
 export let fileSystemProvider: FileSystemProvider;
 export let explorerProvider: ObjectScriptExplorerProvider;
@@ -262,6 +263,7 @@ export async function checkConnection(clearCookies = false, uri?: vscode.Uri): P
     outputChannel.appendError(message);
     panel.text = `${PANEL_LABEL} $(error)`;
     panel.tooltip = `ERROR - ${message}`;
+    disableConnection(configName);
     return;
   }
   api
@@ -391,6 +393,9 @@ function languageServer(install = true): vscode.Extension<any> {
   let extension = vscode.extensions.getExtension(extId);
 
   async function languageServerInstall() {
+    if (config("ignoreInstallLanguageServer")) {
+      return;
+    }
     try {
       await vscode.commands.executeCommand("extension.open", extId);
     } catch (ex) {
@@ -483,15 +488,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<any> {
     await checkConnection(true, uri);
   }
 
-  vscode.workspace.onDidChangeWorkspaceFolders(({ added, removed }) => {
+  vscode.workspace.onDidChangeWorkspaceFolders(async ({ added, removed }) => {
     const folders = vscode.workspace.workspaceFolders;
+
+    // Make sure we have a resolved connection spec for the targets of all added folders
+    const toCheck = new Map<string, vscode.Uri>();
+    added.map((workspaceFolder) => {
+      const uri = workspaceFolder.uri;
+      const { configName } = connectionTarget(uri);
+      toCheck.set(configName, uri);
+    });
+    for await (const oneToCheck of toCheck) {
+      const configName = oneToCheck[0];
+      const uri = oneToCheck[1];
+      const serverName = uri.scheme === "file" ? config("conn", configName).server : configName;
+      await resolveConnectionSpec(serverName);
+    }
+
+    // If it was just the addition of the first folder, and this is one of the isfs types, hide the ObjectScript Explorer for this workspace
     if (
       folders?.length === 1 &&
       added?.length === 1 &&
       removed?.length === 0 &&
       filesystemSchemas.includes(added[0].uri.scheme)
     ) {
-      // First folder has been added and is one of the isfs types, so hide the ObjectScript Explorer for this workspace
       vscode.workspace
         .getConfiguration("objectscript")
         .update("showExplorer", false, vscode.ConfigurationTarget.Workspace);
@@ -576,33 +596,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<any> {
     packageJson.enableProposedApi && typeof vscode.workspace.registerTextSearchProvider === "function"
       ? vscode.workspace.registerTextSearchProvider(FILESYSTEM_READONLY_SCHEMA, new TextSearchProvider())
       : null,
-    packageJson.enableProposedApi && typeof vscode.workspace.registerResourceLabelFormatter === "function"
-      ? vscode.workspace.registerResourceLabelFormatter({
-          scheme: FILESYSTEM_SCHEMA,
-          formatting: {
-            label: "${authority}:${path}",
-            separator: "/",
-          },
-        })
-      : null,
-    packageJson.enableProposedApi && typeof vscode.workspace.registerResourceLabelFormatter === "function"
-      ? vscode.workspace.registerResourceLabelFormatter({
-          scheme: FILESYSTEM_READONLY_SCHEMA,
-          formatting: {
-            label: "${authority}:${path}",
-            separator: "/",
-          },
-        })
-      : null,
-    packageJson.enableProposedApi && typeof vscode.workspace.registerResourceLabelFormatter === "function"
-      ? vscode.workspace.registerResourceLabelFormatter({
-          scheme: OBJECTSCRIPT_FILE_SCHEMA,
-          formatting: {
-            label: "${path} (read-only)",
-            separator: "/",
-          },
-        })
-      : null,
   ].filter(notNull);
 
   if (proposed.length > 0) {
@@ -614,8 +607,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<any> {
     context.extensionMode && context.extensionMode !== vscode.ExtensionMode.Test ? languageServer() : null;
   const noLSsubscriptions: { dispose(): any }[] = [];
   if (!languageServerExt) {
-    outputChannel.appendLine(`The intersystems.language-server extension is not installed or has been disabled.\n`);
-    outputChannel.show(true);
+    if (!config("ignoreInstallLanguageServer")) {
+      outputChannel.appendLine(`The intersystems.language-server extension is not installed or has been disabled.\n`);
+      outputChannel.show(true);
+    }
 
     if (vscode.window.activeTextEditor) {
       diagnosticProvider.updateDiagnostics(vscode.window.activeTextEditor.document);
@@ -868,6 +863,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<any> {
       documentSelector("objectscript-class"),
       new ObjectScriptClassCodeLensProvider()
     ),
+    vscode.languages.registerDocumentLinkProvider({ language: "objectscript-output" }, new DocumentLinkProvider()),
 
     /* Anything we use from the VS Code proposed API */
     ...proposed
